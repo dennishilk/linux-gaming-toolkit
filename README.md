@@ -29,13 +29,14 @@ Includes Steam, Lutris, Proton, WineHQ, Gamemode, Heroic Launcher, OBS, Discord,
 1. Clone this repository:
    
    git clone https://github.com/dennishilk/linux-gaming-setup.git
+   
    cd linux-gaming-setup
    
-2. Make the script executable:
+3. Make the script executable:
 
    chmod +x linux-gaming-setup.sh
 
-3. Run it with root privileges:
+4. Run it with root privileges:
 
    sudo ./linux-gaming-setup.sh
    
