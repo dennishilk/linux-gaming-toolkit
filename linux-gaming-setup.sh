@@ -6,8 +6,7 @@
 #  Nerd Edition 🕹️🐧
 # ==============================
 
-set -u  # scream on unbound vars (we guard every env read)
-# set -e  # <- not using, we handle errors per-step for better UX
+set -u  # be strict about unbound vars
 
 # ============ GLOBALS ============
 LOGFILE="/var/log/linux-gaming-toolkit.log"
@@ -19,19 +18,27 @@ FLATPAK_REMOTE="https://flathub.org/repo/flathub.flatpakrepo"
 
 # ============ HELPERS ============
 check_root() {
-  # without root, you're observing, not gaming 🕶️
+  # without root, you're observing, not gaming
   if [ "${EUID:-999}" -ne 0 ]; then
     echo "❌ Please run as root (sudo)."; exit 1
   fi
 }
 
-log()       { echo -e "$(date '+%F %T') | $*" | tee -a "$LOGFILE"; }
-success()   { log "✅ $*"; }
-failure()   { log "❌ $*"; }
-run_cmd() {  # run_cmd "Description" cmd...
+log()     { echo -e "$(date '+%F %T') | $*" | tee -a "$LOGFILE" >/dev/null; }
+success() { log "✅ $*"; }
+failure() { log "❌ $*"; }
+
+# Run a command with live console output AND logging.
+# Captures the real exit code even with pipes.
+run_cmd() {
   local desc="$1"; shift
   log "▶ $desc"
-  if "$@" >>"$LOGFILE" 2>&1; then success "$desc"; return 0; else failure "$desc"; return 1; fi
+  set -o pipefail
+  ( "$@" 2>&1 | tee -a "$LOGFILE" )
+  local rc=${PIPESTATUS[0]}
+  set +o pipefail
+  if [ $rc -eq 0 ]; then success "$desc"; else failure "$desc"; fi
+  return $rc
 }
 
 ensure_cmd() {  # ensure_cmd <binary> <pkg>
@@ -41,7 +48,7 @@ ensure_cmd() {  # ensure_cmd <binary> <pkg>
 pkg_exists_apt()    { apt-cache show "$1" >/dev/null 2>&1; }
 pkg_exists_pacman() { pacman -Si "$1"     >/dev/null 2>&1; }
 
-# Safe read of /etc/os-release (won't explode with set -u)
+# Safe read of /etc/os-release (no set -u explosions)
 read_os_release() {
   if [ -r /etc/os-release ]; then
     # shellcheck disable=SC1091
@@ -49,7 +56,6 @@ read_os_release() {
   else
     ID=""; ID_LIKE=""; VERSION_CODENAME=""; UBUNTU_CODENAME=""
   fi
-  # Guard all with defaults for set -u safety:
   ID="${ID:-}"; ID_LIKE="${ID_LIKE:-}"
   VERSION_CODENAME="${VERSION_CODENAME:-}"; UBUNTU_CODENAME="${UBUNTU_CODENAME:-}"
 }
@@ -69,17 +75,15 @@ detect_distro() {
   log "Detected distro: ${DISTRO}"
 }
 
-# Multiarch for Deb/Ubuntu
 enable_i386() {
   if [[ "$DISTRO" == "debian" || "$DISTRO" == "ubuntu" ]]; then
     if ! dpkg --print-foreign-architectures | grep -qw i386; then
       run_cmd "Enable i386 multiarch" dpkg --add-architecture i386
     fi
-    run_cmd "apt update" apt update
+    run_cmd "apt update" apt update -o Dpkg::Progress-Fancy=1
   fi
 }
 
-# Debian: enable contrib/non-free/non-free-firmware
 enable_debian_components() {
   local changed=0
   local files=(/etc/apt/sources.list /etc/apt/sources.list.d/*.list)
@@ -92,19 +96,17 @@ enable_debian_components() {
       changed=1
     fi
   done
-  [ "$changed" -eq 1 ] && run_cmd "apt update" apt update
+  [ "$changed" -eq 1 ] && run_cmd "apt update" apt update -o Dpkg::Progress-Fancy=1
 }
 
-# Ubuntu/Mint: restricted/universe/multiverse
 enable_ubuntu_components() {
   ensure_cmd add-apt-repository software-properties-common
   run_cmd "Enable restricted"  add-apt-repository -y restricted
   run_cmd "Enable universe"    add-apt-repository -y universe
   run_cmd "Enable multiverse"  add-apt-repository -y multiverse
-  run_cmd "apt update" apt update
+  run_cmd "apt update" apt update -o Dpkg::Progress-Fancy=1
 }
 
-# Arch: enable multilib for Steam/32-bit
 enable_arch_multilib() {
   if ! grep -Eq '^\[multilib\]' /etc/pacman.conf; then
     echo -e "\n[multilib]\nInclude = /etc/pacman.d/mirrorlist" >> /etc/pacman.conf
@@ -114,7 +116,6 @@ enable_arch_multilib() {
   run_cmd "Refresh pacman DB" pacman -Sy
 }
 
-# Arch: try to ensure yay (AUR helper); fall back gracefully
 ensure_yay() {
   if ! command -v yay &>/dev/null; then
     if pacman -Si yay &>/dev/null; then
@@ -125,7 +126,6 @@ ensure_yay() {
   fi
 }
 
-# Prompt helper
 ask_flatpak_or_native() { whiptail --title "Install $1" --yesno "Install $1 as Flatpak?\nYes = Flatpak, No = Native" 10 64; }
 
 # ============ PRE-FLIGHT ============
@@ -140,7 +140,7 @@ pre_checks() {
     ensure_cmd flatpak flatpak
     ensure_yay
   else
-    run_cmd "apt update" apt update
+    run_cmd "apt update" apt update -o Dpkg::Progress-Fancy=1
     [[ "$DISTRO" == "debian" ]] && enable_debian_components
     [[ "$DISTRO" == "ubuntu" ]] && enable_ubuntu_components
     ensure_cmd whiptail whiptail
@@ -179,14 +179,18 @@ detect_gpu() {
 }
 
 install_update() {
-  [[ "$DISTRO" == "arch" ]] && run_cmd "System update" pacman -Syu --noconfirm || run_cmd "System update" bash -c "apt update && apt upgrade -y"
+  if [[ "$DISTRO" == "arch" ]]; then
+    run_cmd "System update" pacman -Syu --noconfirm
+  else
+    run_cmd "apt update"  apt update  -o Dpkg::Progress-Fancy=1
+    run_cmd "apt upgrade" apt upgrade -y -o Dpkg::Progress-Fancy=1
+  fi
 }
 
 install_nvidia() {
   if [[ "$DISTRO" == "arch" ]]; then
     run_cmd "Install NVIDIA (Arch)" $PKG nvidia nvidia-utils lib32-nvidia-utils
   else
-    # Ubuntu/Mint: vendor tool; Debian: meta-packages
     if command -v ubuntu-drivers &>/dev/null; then
       run_cmd "Install ubuntu-drivers-common" apt install -y ubuntu-drivers-common
       run_cmd "ubuntu-drivers autoinstall" ubuntu-drivers autoinstall
@@ -219,7 +223,7 @@ install_lutris() {
     run_cmd "Install Lutris (Flatpak)" flatpak install -y flathub net.lutris.Lutris
   else
     if [[ "$DISTRO" == "arch" ]]; then
-      run_cmd "Install Lutris (Arch)" $PKG lutris || { [[ $YAY_OK -eq 1 ]] && run_cmd "Install Lutris (AUR fallback)" $AUR lutris || run_cmd "Install Lutris (Flatpak fallback)" flatpak install -y flathub net.lutris.Lutris; }
+      run_cmd "Install Lutris (Arch)" $PKG lutris || { [[ $YAY_OK -eq 1 ]] && run_cmd "Install Lutris (AUR)" $AUR lutris || run_cmd "Install Lutris (Flatpak fallback)" flatpak install -y flathub net.lutris.Lutris; }
     else
       run_cmd "Install Lutris (APT)" $PKG lutris || run_cmd "Install Lutris (Flatpak fallback)" flatpak install -y flathub net.lutris.Lutris
     fi
@@ -231,10 +235,9 @@ install_wine() {
     run_cmd "Install Wine (Arch)" $PKG wine-staging winetricks
   else
     enable_i386
-    # Try WineHQ (best), fallback to distro wine
     read_os_release
     local codename=""
-    if [[ "${ID:-}" == "debian" ]]; then
+    if [[ "${ID}" == "debian" ]]; then
       codename="${VERSION_CODENAME}"
       run_cmd "Add WineHQ key" wget -qO /etc/apt/keyrings/winehq-archive.key https://dl.winehq.org/wine-builds/winehq.key
       run_cmd "Add WineHQ source (Debian)" wget -qNP /etc/apt/sources.list.d/ "https://dl.winehq.org/wine-builds/debian/dists/${codename}/winehq-${codename}.sources" || true
@@ -244,8 +247,10 @@ install_wine() {
       run_cmd "Add WineHQ key" wget -qO /etc/apt/keyrings/winehq-archive.key https://dl.winehq.org/wine-builds/winehq.key
       run_cmd "Add WineHQ source (Ubuntu/Mint)" wget -qNP /etc/apt/sources.list.d/ "https://dl.winehq.org/wine-builds/ubuntu/dists/${codename}/winehq-${codename}.sources" || true
     fi
-    run_cmd "apt update" apt update
-    run_cmd "Install WineHQ (staging)" $PKG --install-recommends winehq-staging || run_cmd "Install distro wine (fallback)" $PKG wine-staging || run_cmd "Install wine (fallback2)" $PKG wine
+    run_cmd "apt update" apt update -o Dpkg::Progress-Fancy=1
+    run_cmd "Install WineHQ (staging)" $PKG --install-recommends winehq-staging || \
+    run_cmd "Install distro wine (fallback)" $PKG wine-staging || \
+    run_cmd "Install wine (fallback2)" $PKG wine
   fi
 }
 
@@ -284,7 +289,6 @@ install_obs() {
 }
 
 install_chat() {
-  # Discord
   if ask_flatpak_or_native "Discord"; then
     run_cmd "Install Discord (Flatpak)" flatpak install -y flathub com.discordapp.Discord
   else
@@ -294,7 +298,6 @@ install_chat() {
       run_cmd "Install Discord (APT)" $PKG discord || run_cmd "Discord Flatpak fallback" flatpak install -y flathub com.discordapp.Discord
     fi
   fi
-  # TeamSpeak
   if [[ "$DISTRO" == "arch" ]]; then
     run_cmd "Install TeamSpeak (Arch)" $PKG teamspeak3 || { [[ $YAY_OK -eq 1 ]] && run_cmd "Install TeamSpeak (AUR)" $AUR teamspeak3 || run_cmd "TeamSpeak (Flatpak)" flatpak install -y flathub com.teamspeak.TeamSpeak; }
   else
@@ -314,11 +317,11 @@ install_benchmarks() {
 install_dxvk_vkd3d() {
   if [[ "$DISTRO" == "arch" ]]; then
     if pkg_exists_pacman dxvk; then run_cmd "Install DXVK (Arch)" pacman -S --noconfirm --needed dxvk
-    elif [[ $YAY_OK -eq 1 ]]; then run_cmd "Install DXVK (AUR bin)" $AUR dxvk-bin; else success "DXVK provided by Proton/Lutris runtime."; fi
-    if pkg_exists_pacman vkd3d-proton; then run_cmd "Install VKD3D-Proton (Arch)" pacman -S --noconfirm --needed vkd3d-proton; else success "VKD3D provided by Proton."; fi
+    elif [[ $YAY_OK -eq 1 ]]; then run_cmd "Install DXVK (AUR bin)" $AUR dxvk-bin; else success "DXVK via Proton/Lutris."; fi
+    if pkg_exists_pacman vkd3d-proton; then run_cmd "Install VKD3D-Proton (Arch)" pacman -S --noconfirm --needed vkd3d-proton; else success "VKD3D via Proton."; fi
   else
-    if pkg_exists_apt dxvk; then run_cmd "Install DXVK (APT)" apt install -y dxvk; else success "DXVK via Proton/Lutris will be used."; fi
-    if pkg_exists_apt vkd3d-proton; then run_cmd "Install VKD3D-Proton (APT)" apt install -y vkd3d-proton; else success "VKD3D-Proton via Proton will be used."; fi
+    if pkg_exists_apt dxvk; then run_cmd "Install DXVK (APT)" apt install -y dxvk; else success "DXVK via Proton/Lutris."; fi
+    if pkg_exists_apt vkd3d-proton; then run_cmd "Install VKD3D-Proton (APT)" apt install -y vkd3d-proton; else success "VKD3D via Proton."; fi
   fi
 }
 
