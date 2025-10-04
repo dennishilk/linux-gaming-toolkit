@@ -1,67 +1,63 @@
 #!/bin/bash
 # ==============================
-#  Linux Gaming Toolkit v1
+#  Linux Gaming Toolkit v3
 #  by Dennis Hilk
 #  Debian | Ubuntu | Mint | Arch
 #  Nerd Edition 🕹️🐧
 # ==============================
 
-set -u
+set -u  # be loud about unbound vars (we handle them safely)
 
-# ===================== GLOBAL VARS =====================
+# ============ GLOBALS ============
 LOGFILE="/var/log/linux-gaming-toolkit.log"
-DISTRO=""; PKG=""
-YAY_OK=1
+DISTRO=""          # arch | debian | ubuntu
+PKG=""             # package install cmd for current distro
+YAY_OK=1           # 1 if yay usable
 AUR="yay -S --noconfirm"
 FLATPAK_REMOTE="https://flathub.org/repo/flathub.flatpakrepo"
 
-# ===================== HELPER FUNCTIONS =====================
+# ============ HELPERS ============
 check_root() {
   # because without root you're just a spectator 🕶️
   if [ "$EUID" -ne 0 ]; then
-    echo "❌ Please run as root (sudo) – admin powers required!"
-    exit 1
+    echo "❌ Please run as root (sudo)."; exit 1
   fi
 }
 
 log()       { echo -e "$(date '+%F %T') | $*" | tee -a "$LOGFILE"; }
 success()   { log "✅ $*"; }
 failure()   { log "❌ $*"; }
-
-run_cmd() { # run_cmd "Description" cmd...
+run_cmd() {  # run_cmd "Description" cmd...
   local desc="$1"; shift
   log "▶ $desc"
-  if "$@" >>"$LOGFILE" 2>&1; then
-    success "$desc"
-    return 0
-  else
-    failure "$desc"
-    return 1
-  fi
+  if "$@" >>"$LOGFILE" 2>&1; then success "$desc"; return 0; else failure "$desc"; return 1; fi
 }
 
-# check if a binary exists, else install package
-ensure_cmd() {
+ensure_cmd() { # ensure_cmd <binary> <pkg-name>
   command -v "$1" &>/dev/null || run_cmd "Install $2" $PKG "$2"
 }
 
-# detect what kind of penguin we are 🐧
+pkg_exists_apt()    { apt-cache show "$1" >/dev/null 2>&1; }
+pkg_exists_pacman() { pacman -Si "$1"     >/dev/null 2>&1; }
+
+# Robust distro detection (safe with set -u)
 detect_distro() {
-  source /etc/os-release
-  if [[ "$ID" == "arch" || "$ID_LIKE" == *"arch"* ]]; then
+  source /etc/os-release 2>/dev/null || { echo "⚠️ /etc/os-release missing."; exit 1; }
+  local _id="${ID:-}" _like="${ID_LIKE:-}" blob="$_id $_like"
+
+  if [[ "$blob" == *"arch"* ]]; then
     DISTRO="arch";   PKG="pacman -S --noconfirm --needed"
-  elif [[ "$ID" == "debian" || "$ID_LIKE" == *"debian"* ]]; then
+  elif [[ "$blob" == *"debian"* || "$_id" == "debian" ]]; then
     DISTRO="debian"; PKG="apt install -y"
-  elif [[ "$ID" == "ubuntu" || "$ID" == "linuxmint" ]]; then
+  elif [[ "$_id" == "ubuntu" || "$_id" == "linuxmint" || "$blob" == *"ubuntu"* ]]; then
     DISTRO="ubuntu"; PKG="apt install -y"
   else
-    echo "⚠️ Unsupported distribution. Not cool."
-    exit 1
+    echo "⚠️ Unsupported distribution (ID='$_id', LIKE='$_like')."; exit 1
   fi
   log "Detected distro: $DISTRO"
 }
 
-# Debian/Ubuntu need 32bit libs for Steam/Wine
+# Debian/Ubuntu: enable 32-bit libs for Steam/Wine
 enable_i386() {
   if [[ "$DISTRO" == "debian" || "$DISTRO" == "ubuntu" ]]; then
     dpkg --print-foreign-architectures | grep -qw i386 || run_cmd "Enable i386 multiarch" dpkg --add-architecture i386
@@ -69,7 +65,32 @@ enable_i386() {
   fi
 }
 
-# Arch needs multilib for Steam
+# Debian: ensure contrib/non-free/non-free-firmware are present
+enable_debian_components() {
+  local changed=0
+  local files=(/etc/apt/sources.list /etc/apt/sources.list.d/*.list)
+  for f in "${files[@]}"; do
+    [ -f "$f" ] || continue
+    if grep -Eq '^[[:space:]]*deb[[:space:]].*\bmain\b' "$f" && \
+       ! grep -Eq '^[[:space:]]*deb[[:space:]].*\bcontrib\b' "$f"; then
+      run_cmd "Enable contrib & non-free in $f" \
+        sed -E -i 's/^( *deb +[^#]*\bmain\b)(.*)$/\1 contrib non-free non-free-firmware\2/' "$f"
+      changed=1
+    fi
+  done
+  [ "$changed" -eq 1 ] && run_cmd "apt update" apt update
+}
+
+# Ubuntu/Mint: restricted/universe/multiverse (drivers, Steam, etc.)
+enable_ubuntu_components() {
+  ensure_cmd add-apt-repository software-properties-common
+  run_cmd "Enable restricted"  add-apt-repository -y restricted
+  run_cmd "Enable universe"    add-apt-repository -y universe
+  run_cmd "Enable multiverse"  add-apt-repository -y multiverse
+  run_cmd "apt update" apt update
+}
+
+# Arch: multilib (Steam/32bit)
 enable_arch_multilib() {
   if ! grep -Eq '^\[multilib\]' /etc/pacman.conf; then
     echo -e "\n[multilib]\nInclude = /etc/pacman.d/mirrorlist" >> /etc/pacman.conf
@@ -79,26 +100,24 @@ enable_arch_multilib() {
   run_cmd "Refresh pacman DB" pacman -Sy
 }
 
-# because Arch kids live in the AUR 🧑‍💻
+# Arch: AUR helper (yay) – because we live dangerously 🧑‍💻
 ensure_yay() {
   if ! command -v yay &>/dev/null; then
     if pacman -Si yay &>/dev/null; then
-      run_cmd "Install yay (AUR helper)" pacman -S --noconfirm --needed yay || YAY_OK=0
+      run_cmd "Install yay" pacman -S --noconfirm --needed yay || YAY_OK=0
     else
       YAY_OK=0
     fi
   fi
 }
 
-# Flatpak vs Native selection popup
-ask_flatpak_or_native() {
-  whiptail --title "Install $1" --yesno "Install $1 as Flatpak? (Yes=Flatpak, No=Native)" 10 60
-}
+# Flatpak vs Native prompt
+ask_flatpak_or_native() { whiptail --title "Install $1" --yesno "Install $1 as Flatpak?\nYes = Flatpak, No = Native" 10 60; }
 
-# ===================== PRE-CHECKS =====================
+# ============ PRE-FLIGHT ============
 pre_checks() {
-  log "Running system sanity checks..."
-  touch "$LOGFILE" || { echo "Cannot write to $LOGFILE"; exit 1; }
+  log "Running pre-installation checks..."
+  touch "$LOGFILE" || { echo "Cannot write log: $LOGFILE"; exit 1; }
 
   if [[ "$DISTRO" == "arch" ]]; then
     run_cmd "pacman -Sy" pacman -Sy --noconfirm
@@ -108,18 +127,17 @@ pre_checks() {
     ensure_yay
   else
     run_cmd "apt update" apt update
-    [[ "$DISTRO" == "debian" ]] && run_cmd "Enable contrib/non-free" true
-    [[ "$DISTRO" == "ubuntu" ]] && run_cmd "Enable restricted/universe/multiverse" true
+    [[ "$DISTRO" == "debian" ]] && enable_debian_components
+    [[ "$DISTRO" == "ubuntu" ]] && enable_ubuntu_components
     ensure_cmd whiptail whiptail
     ensure_cmd flatpak flatpak
     run_cmd "Install wget/ca-certificates" apt install -y wget ca-certificates
   fi
-
   run_cmd "Add Flathub" flatpak remote-add --if-not-exists flathub "$FLATPAK_REMOTE"
-  success "System pre-flight check complete. Buckle up 🚀"
+  success "Pre-flight checks complete. Buckle up 🚀"
 }
 
-# ===================== ASCII ART =====================
+# ============ UI ============
 show_banner() {
 cat << "EOF"
 
@@ -137,63 +155,219 @@ EOF
 sleep 1
 }
 
-# ===================== INSTALL FUNCTIONS =====================
-# (shortened comments here, but with nerdy vibe)
-
+# ============ ACTIONS ============
 detect_gpu() {
   ensure_cmd lspci pciutils
-  if lspci | grep -i nvidia >/dev/null; then log "NVIDIA GPU detected 🟦"; 
-  elif lspci | grep -i amd >/dev/null; then log "AMD GPU detected 🔴"; 
-  elif lspci | grep -i intel >/dev/null; then log "Intel GPU detected 🟩"; 
-  else log "No supported GPU found 😢"; fi
+  if lspci | grep -i nvidia >/dev/null; then log "✅ NVIDIA GPU detected";
+  elif lspci | grep -i amd   >/dev/null; then log "✅ AMD GPU detected";
+  elif lspci | grep -i intel >/dev/null; then log "✅ Intel GPU detected";
+  else log "⚠️ No supported GPU found"; fi
 }
 
-install_update()   { [[ "$DISTRO" == "arch" ]] && run_cmd "System Update" pacman -Syu --noconfirm || run_cmd "System Update" bash -c "apt update && apt upgrade -y"; }
-install_nvidia()   { [[ "$DISTRO" == "arch" ]] && run_cmd "NVIDIA Drivers" $PKG nvidia nvidia-utils lib32-nvidia-utils || run_cmd "NVIDIA Drivers (Deb/Ubuntu)" $PKG nvidia-driver; }
-install_amd()      { [[ "$DISTRO" == "arch" ]] && run_cmd "AMD Vulkan" $PKG mesa vulkan-radeon lib32-mesa lib32-vulkan-radeon mesa-demos vulkan-tools || run_cmd "AMD Vulkan (Deb)" $PKG mesa-vulkan-drivers; }
-install_steam()    { [[ "$DISTRO" == "arch" ]] && run_cmd "Steam" $PKG steam || run_cmd "Steam (Deb)" $PKG steam; }
-install_lutris()   { run_cmd "Lutris" flatpak install -y flathub net.lutris.Lutris; }
-install_wine()     { [[ "$DISTRO" == "arch" ]] && run_cmd "Wine Staging" $PKG wine-staging winetricks || run_cmd "WineHQ staging (Deb)" $PKG winehq-staging; }
-install_gamemode() { run_cmd "Gamemode + MangoHud" $PKG gamemode mangohud; }
-install_heroic()   { run_cmd "Heroic Games Launcher" flatpak install -y flathub com.heroicgameslauncher.hgl; }
-install_itch()     { run_cmd "itch.io Client" flatpak install -y flathub io.itch.itch; }
-install_obs()      { ask_flatpak_or_native "OBS" && run_cmd "OBS (Flatpak)" flatpak install -y flathub com.obsproject.Studio || run_cmd "OBS Native" $PKG obs-studio; }
-install_chat()     { run_cmd "Discord" flatpak install -y flathub com.discordapp.Discord; run_cmd "TeamSpeak" flatpak install -y flathub com.teamspeak.TeamSpeak; }
-install_benchmarks(){ run_cmd "Benchmarks" $PKG glmark2; }
-install_dxvk()     { run_cmd "DXVK/VKD3D" echo "Pretend DXVK installed 🚀"; }
-install_kernel()   { run_cmd "Gaming Kernel" echo "Pretend Kernel installed 🧑‍🚀"; }
+install_update() {
+  if [[ "$DISTRO" == "arch" ]]; then
+    run_cmd "System update" pacman -Syu --noconfirm
+  else
+    run_cmd "System update" bash -c "apt update && apt upgrade -y"
+  fi
+}
+
+install_nvidia() {
+  if [[ "$DISTRO" == "arch" ]]; then
+    run_cmd "Install NVIDIA (Arch)" $PKG nvidia nvidia-utils lib32-nvidia-utils
+  else
+    if command -v ubuntu-drivers &>/dev/null; then
+      run_cmd "Install ubuntu-drivers-common" apt install -y ubuntu-drivers-common
+      run_cmd "ubuntu-drivers autoinstall" ubuntu-drivers autoinstall
+    else
+      run_cmd "Install NVIDIA (Debian)" $PKG nvidia-driver firmware-misc-nonfree
+    fi
+  fi
+}
+
+install_amd() {
+  if [[ "$DISTRO" == "arch" ]]; then
+    run_cmd "Install AMD Vulkan (Arch)" $PKG mesa vulkan-radeon lib32-mesa lib32-vulkan-radeon mesa-demos vulkan-tools
+  else
+    enable_i386
+    run_cmd "Install AMD Vulkan (Deb/Ubuntu)" $PKG mesa-vulkan-drivers mesa-vulkan-drivers:i386 mesa-utils vulkan-tools
+  fi
+}
+
+install_steam() {
+  if [[ "$DISTRO" == "arch" ]]; then
+    run_cmd "Install Steam (Arch)" $PKG steam
+  else
+    enable_i386
+    run_cmd "Install Steam (Deb/Ubuntu)" $PKG steam
+  fi
+}
+
+install_lutris() {
+  if ask_flatpak_or_native "Lutris"; then
+    run_cmd "Install Lutris (Flatpak)" flatpak install -y flathub net.lutris.Lutris
+  else
+    if [[ "$DISTRO" == "arch" ]]; then
+      run_cmd "Install Lutris (Arch)" $PKG lutris || { [[ $YAY_OK -eq 1 ]] && run_cmd "Install Lutris (AUR)" $AUR lutris; }
+    else
+      run_cmd "Install Lutris (APT)" $PKG lutris || run_cmd "Install Lutris (Flatpak fallback)" flatpak install -y flathub net.lutris.Lutris
+    fi
+  fi
+}
+
+install_wine() {
+  if [[ "$DISTRO" == "arch" ]]; then
+    run_cmd "Install Wine (Arch)" $PKG wine-staging winetricks
+  else
+    enable_i386
+    mkdir -pm755 /etc/apt/keyrings
+    run_cmd "Get WineHQ key" wget -qO /etc/apt/keyrings/winehq-archive.key https://dl.winehq.org/wine-builds/winehq.key
+    source /etc/os-release
+    if [[ "${ID:-}" == "debian" ]]; then
+      local CODENAME="${VERSION_CODENAME:-}"
+      run_cmd "Add WineHQ source (Debian)" wget -qNP /etc/apt/sources.list.d/ "https://dl.winehq.org/wine-builds/debian/dists/${CODENAME}/winehq-${CODENAME}.sources"
+    else
+      local CODENAME="${UBUNTU_CODENAME:-}"; command -v lsb_release &>/dev/null && CODENAME="${CODENAME:-$(lsb_release -sc)}"
+      run_cmd "Add WineHQ source (Ubuntu/Mint)" wget -qNP /etc/apt/sources.list.d/ "https://dl.winehq.org/wine-builds/ubuntu/dists/${CODENAME}/winehq-${CODENAME}.sources"
+    fi
+    run_cmd "apt update" apt update
+    run_cmd "Install WineHQ (staging)" $PKG --install-recommends winehq-staging
+  fi
+}
+
+install_gamemode() {
+  if [[ "$DISTRO" == "arch" ]]; then
+    run_cmd "Install Gamemode + MangoHud (Arch)" $PKG gamemode mangohud lib32-mangohud
+  else
+    run_cmd "Install Gamemode + MangoHud (Deb/Ubuntu)" $PKG gamemode mangohud
+  fi
+}
+
+install_heroic() {
+  if [[ "$DISTRO" == "arch" ]]; then
+    if [[ $YAY_OK -eq 1 ]]; then
+      run_cmd "Install Heroic (AUR)" $AUR heroic-games-launcher-bin
+    else
+      run_cmd "Install Heroic (Flatpak)" flatpak install -y flathub com.heroicgameslauncher.hgl
+    fi
+  else
+    run_cmd "Install Heroic (Flatpak)" flatpak install -y flathub com.heroicgameslauncher.hgl
+  fi
+}
+
+install_itch() { run_cmd "Install itch.io (Flatpak)" flatpak install -y flathub io.itch.itch; }
+
+install_obs() {
+  if ask_flatpak_or_native "OBS Studio"; then
+    run_cmd "Install OBS (Flatpak)" flatpak install -y flathub com.obsproject.Studio
+  else
+    if [[ "$DISTRO" == "arch" ]]; then
+      run_cmd "Install OBS (Arch)" $PKG obs-studio
+    else
+      run_cmd "Install OBS (APT)" $PKG obs-studio || run_cmd "OBS Flatpak fallback" flatpak install -y flathub com.obsproject.Studio
+    fi
+  fi
+}
+
+install_chat() {
+  if ask_flatpak_or_native "Discord"; then
+    run_cmd "Install Discord (Flatpak)" flatpak install -y flathub com.discordapp.Discord
+  else
+    if [[ "$DISTRO" == "arch" ]]; then
+      run_cmd "Install Discord (Arch)" $PKG discord || { [[ $YAY_OK -eq 1 ]] && run_cmd "Install Discord (AUR)" $AUR discord; }
+    else
+      run_cmd "Install Discord (APT)" $PKG discord || run_cmd "Discord Flatpak fallback" flatpak install -y flathub com.discordapp.Discord
+    fi
+  fi
+  # TeamSpeak (native where possible, else Flatpak)
+  if [[ "$DISTRO" == "arch" ]]; then
+    run_cmd "Install TeamSpeak (Arch)" $PKG teamspeak3 || { [[ $YAY_OK -eq 1 ]] && run_cmd "Install TeamSpeak (AUR)" $AUR teamspeak3; }
+  else
+    run_cmd "Install TeamSpeak (APT)" $PKG teamspeak3-client || run_cmd "TeamSpeak (Flatpak)" flatpak install -y flathub com.teamspeak.TeamSpeak
+  fi
+}
+
+install_benchmarks() {
+  if [[ "$DISTRO" == "arch" ]]; then
+    run_cmd "Install Benchmarks (Arch)" $PKG vulkan-tools mesa-demos glmark2
+    [[ $YAY_OK -eq 1 ]] && whiptail --title "Optional" --yesno "Install Unigine Heaven (AUR)?" 10 60 && run_cmd "Install Unigine Heaven (AUR)" $AUR unigine-heaven
+  else
+    run_cmd "Install Benchmarks (Deb/Ubuntu)" $PKG glmark2 vulkan-tools mesa-utils
+  fi
+}
+
+install_dxvk_vkd3d() {
+  if [[ "$DISTRO" == "arch" ]]; then
+    if pkg_exists_pacman dxvk; then run_cmd "Install DXVK (Arch)" pacman -S --noconfirm --needed dxvk; else
+      [[ $YAY_OK -eq 1 ]] && run_cmd "Install DXVK (AUR bin)" $AUR dxvk-bin; fi
+    if pkg_exists_pacman vkd3d-proton; then run_cmd "Install VKD3D-Proton (Arch)" pacman -S --noconfirm --needed vkd3d-proton; fi
+  else
+    if pkg_exists_apt dxvk; then run_cmd "Install DXVK (APT)" apt install -y dxvk; else success "DXVK via Proton/Lutris will be used."; fi
+    if pkg_exists_apt vkd3d-proton; then run_cmd "Install VKD3D-Proton (APT)" apt install -y vkd3d-proton; else success "VKD3D-Proton via Proton will be used."; fi
+  fi
+}
+
+install_kernel() {
+  if [[ "$DISTRO" == "arch" ]]; then
+    whiptail --title "Gaming Kernel" --yesno "Install linux-zen kernel (Arch)?" 10 60 && \
+      run_cmd "Install linux-zen" $PKG linux-zen linux-zen-headers && log "ℹ️ Reboot to use linux-zen."
+  else
+    whiptail --title "Gaming Kernel" --yesno "Install linux-lowlatency kernel (Ubuntu/Mint)?" 10 60 && \
+      run_cmd "Install linux-lowlatency" apt install -y linux-lowlatency && log "ℹ️ Reboot to use linux-lowlatency."
+  fi
+}
 
 install_all() {
-  install_update; detect_gpu; install_nvidia; install_amd; install_steam; install_lutris; install_wine; install_gamemode; install_heroic; install_itch; install_obs; install_chat; install_benchmarks; install_dxvk
-  whiptail --msgbox "🎉 All gaming stuff installed. GG!" 10 60
+  install_update
+  detect_gpu
+  install_nvidia
+  install_amd
+  install_steam
+  install_lutris
+  install_wine
+  install_gamemode
+  install_heroic
+  install_itch
+  install_obs
+  install_chat
+  install_benchmarks
+  install_dxvk_vkd3d
+  whiptail --msgbox "🎉 All main components installed. Consider installing the Gaming Kernel next!" 10 60
 }
 
 cleanup_all() {
-  log "🧹 Removing all installed packages... RIP setup."
-  # remove packages here...
+  log "🧹 Removing gaming packages..."
+  if [[ "$DISTRO" == "arch" ]]; then
+    run_cmd "Remove Arch packages" pacman -Rns --noconfirm steam lutris wine-staging winetricks gamemode mangohud lib32-mangohud obs-studio discord teamspeak3 vulkan-tools mesa-demos glmark2 || true
+    [[ $YAY_OK -eq 1 ]] && run_cmd "Remove AUR apps" yay -Rns --noconfirm heroic-games-launcher-bin dxvk-bin teamspeak3 discord || true
+  else
+    run_cmd "Remove Deb/Ubuntu packages" apt purge -y steam lutris winehq-staging gamemode mangohud obs-studio teamspeak3-client glmark2 vulkan-tools mesa-utils discord || true
+  fi
+  run_cmd "Remove Flatpaks" flatpak uninstall -y --delete-data com.heroicgameslauncher.hgl io.itch.itch com.obsproject.Studio com.discordapp.Discord com.teamspeak.TeamSpeak net.lutris.Lutris || true
+  log "🧹 Cleanup done."
 }
 
-# ===================== MENU =====================
+# ============ MENU ============
 main_menu() {
   while true; do
-    CHOICE=$(whiptail --title "Linux Gaming Toolkit v3" --menu "Pick your poison 🕹️" 25 78 15 \
-      "1" "Install ALL (One-Click Gaming Overlord)" \
-      "2" "System Update & Upgrade" \
-      "3" "Detect GPU" \
-      "4" "Install NVIDIA Drivers" \
-      "5" "Install AMD Drivers" \
-      "6" "Install Steam" \
-      "7" "Install Lutris" \
-      "8" "Install WineHQ (staging)" \
-      "9" "Install Gamemode + MangoHud" \
-      "10" "Install Heroic Launcher" \
+    CHOICE=$(whiptail --title "Linux Gaming Toolkit v3" --menu "Pick your poison 🕹️" 27 78 18 \
+      "1"  "Install ALL (One-Click Gaming Overlord)" \
+      "2"  "System Update & Upgrade" \
+      "3"  "Detect GPU" \
+      "4"  "Install NVIDIA Drivers" \
+      "5"  "Install AMD Drivers" \
+      "6"  "Install Steam + Proton" \
+      "7"  "Install Lutris (choose Flatpak/Native)" \
+      "8"  "Install WineHQ (staging)" \
+      "9"  "Install Gamemode + MangoHud" \
+      "10" "Install Heroic Games Launcher" \
       "11" "Install itch.io Client" \
-      "12" "Install OBS Studio" \
+      "12" "Install OBS Studio (choose Flatpak/Native)" \
       "13" "Install Discord + TeamSpeak" \
       "14" "Install Benchmark Tools" \
-      "15" "Install DXVK/VKD3D" \
+      "15" "Install DXVK + VKD3D-Proton" \
       "16" "Install Gaming Kernel" \
-      "17" "Cleanup (Remove Gaming Packages)" \
+      "17" "Cleanup: remove gaming packages" \
       "18" "Exit" 3>&1 1>&2 2>&3)
 
     case "$CHOICE" in
@@ -211,7 +385,7 @@ main_menu() {
       12) install_obs ;;
       13) install_chat ;;
       14) install_benchmarks ;;
-      15) install_dxvk ;;
+      15) install_dxvk_vkd3d ;;
       16) install_kernel ;;
       17) cleanup_all ;;
       18) exit 0 ;;
@@ -219,10 +393,9 @@ main_menu() {
   done
 }
 
-# ===================== MAIN =====================
+# ============ RUN ============
 check_root
 detect_distro
 pre_checks
 show_banner
 main_menu
-
