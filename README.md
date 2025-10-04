@@ -28,7 +28,7 @@ Includes Steam, Lutris, Proton, WineHQ, Gamemode, Heroic Launcher, OBS, Discord,
 
 1. Clone this repository:
    
-   git clone https://github.com/dennishilk/linux-gaming-setup.git
+   git clone https://github.com/dennishilk/linux-gaming-toolkit.git
    
    cd linux-gaming-setup
    
