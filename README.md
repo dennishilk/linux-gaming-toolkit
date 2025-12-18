@@ -7,22 +7,43 @@ Includes Steam, Lutris, Proton, WineHQ, Gamemode, Heroic Launcher, OBS, Discord,
 🔗 Project URL: [https://github.com/dennishilk/linux-gaming-toolkit](https://github.com/dennishilk/linux-gaming-toolkit)  
 
 ---
+🚀 Features (v4)
 
-## 🚀 Features
-- ✅ Multi-distro: Debian, Ubuntu, Mint, Arch & derivatives  
-- ✅ Install ALL option (one-click setup)  
-- ✅ NVIDIA & AMD GPU drivers  
-- ✅ Steam, Lutris, WineHQ, Heroic, itch.io, OBS  
-- ✅ Gamemode + MangoHud  
-- ✅ DXVK / VKD3D-Proton  
-- ✅ Gaming Kernel install (linux-zen / lowlatency)  
-- ✅ Discord + TeamSpeak  
-- ✅ Benchmark tools (glmark2, vulkan-tools, mesa-utils, Unigine optional)  
-- ✅ Logging + Cleanup option  
+✅ Multi-distro support: Debian, Ubuntu, Linux Mint, Arch (+ derivatives)
 
-  🚀 Linux Gaming Toolkit v1 – Debian | Ubuntu | Mint | Arch
-  🐧 By Dennis Hilk – Gaming is not a crime 🎮
+✅ GPU-aware installs (NVIDIA / AMD / Intel detected automatically)
 
+✅ One-click full gaming setup or modular installs via menu
+
+✅ Steam + Proton
+
+✅ Lutris, Wine, Heroic Games Launcher, itch.io
+
+✅ Gamemode + MangoHud
+
+✅ OBS Studio (native or Flatpak fallback)
+
+✅ DXVK / VKD3D-Proton (where available)
+
+✅ Benchmark tools (glmark2, Vulkan tools, Mesa utils)
+
+✅ Flatpak support with Flathub auto-setup
+
+✅ Robust logging & error handling
+
+✅ Cleanup option to remove gaming packages
+
+🧠 What’s new in v4
+
+🔒 Safer Bash (set -Eeuo pipefail + error trap)
+
+🧠 Smarter logic (no unnecessary driver installs)
+
+🎮 GPU-specific driver installation
+
+🧼 Cleaner code structure & reduced duplication
+
+📜 Improved logging (with /tmp fallback if needed)
 
 ## 📥 Installation
 
